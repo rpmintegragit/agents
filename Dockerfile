@@ -52,7 +52,7 @@ EXPOSE 3000
 # Container healthcheck on /api/health using wget (always present in the bun:alpine image). With a
 # HEALTHCHECK declared, the platform uses the container's own probe instead of injecting one.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=5 \
-  CMD wget -q -O /dev/null http://127.0.0.1:3000/api/health || exit 1
+  CMD wget -q -O /dev/null "http://127.0.0.1:${PORT:-3000}/api/health" || exit 1
 
 # Default boot: provision the runtime role (idempotent), migrate as the owner, then run the server
 # interpreted (see the --compile NOTE above). Requires MIGRATION_DATABASE_URL (superuser) +

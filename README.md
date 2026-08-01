@@ -145,6 +145,12 @@ bun dev                   # http://localhost:3000
 
 ## Links
 
+### Deploy na Railway
+
+Para executar o projeto na Railway (sem VPS/Hostinger), consulte
+[`docs/railway.md`](docs/railway.md). O guia cobre pgvector, variáveis, volume persistente, domínio,
+healthcheck, primeiro acesso e atualizações.
+
 - 🌐 Site: [fazer.ai](https://fazer.ai)
 - 📚 Documentação: [`docs/`](docs/)
 - 🤝 Contribuições: [CONTRIBUTING.md](CONTRIBUTING.md)
