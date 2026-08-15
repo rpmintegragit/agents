@@ -87,6 +87,7 @@ jobs:
                 --project "$RAILWAY_PROJECT_ID" \
                 --service "$service" \
                 --environment "$RAILWAY_ENVIRONMENT" \
+                --from-source \
                 --yes
             done
             for service in "${services[@]}"; do
