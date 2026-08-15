@@ -1,0 +1,141 @@
+name: Ligar serviços Railway
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: railway-power-control
+  cancel-in-progress: false
+
+env:
+  RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+  RAILWAY_PROJECT_ID: aba50e0b-ef3e-4ca2-937a-bcfa2a66281c
+  RAILWAY_ENVIRONMENT: production
+  AGENTS_HEALTH_URL: https://agents-production-01bc.up.railway.app/api/health
+  CHATWOOT_HEALTH_URL: https://chatwoot-production-526a.up.railway.app
+
+jobs:
+  start:
+    name: Ligar e validar os 9 serviços
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Validar configuração
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${RAILWAY_TOKEN:-}" ]]; then
+            echo "O secret RAILWAY_TOKEN não foi configurado no repositório." >&2
+            exit 1
+          fi
+
+      - name: Instalar Railway CLI
+        run: npm install --global @railway/cli@5.30.3
+
+      - name: Confirmar projeto Railway
+        run: railway status --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --json
+
+      - name: Ligar serviços na ordem de dependências
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          latest_status() {
+            railway deployment list \
+              --project "$RAILWAY_PROJECT_ID" \
+              --service "$1" \
+              --environment "$RAILWAY_ENVIRONMENT" \
+              --limit 1 \
+              --json | jq -r '
+                if type == "array" then (.[0].status // "UNKNOWN")
+                elif .deployments then (.deployments[0].status // "UNKNOWN")
+                else "UNKNOWN" end'
+          }
+
+          wait_for_success() {
+            local service="$1"
+            for attempt in $(seq 1 60); do
+              local status
+              status="$(latest_status "$service")"
+              echo "$service: $status ($attempt/60)"
+              case "$status" in
+                SUCCESS) return 0 ;;
+                FAILED|CRASHED|NEEDS_APPROVAL)
+                  echo "$service terminou em $status." >&2
+                  return 1
+                  ;;
+              esac
+              sleep 10
+            done
+            echo "Tempo excedido aguardando $service." >&2
+            return 1
+          }
+
+          start_batch() {
+            local services=("$@")
+            for service in "${services[@]}"; do
+              if [[ "$(latest_status "$service")" == "SUCCESS" ]]; then
+                echo "$service já está online."
+                continue
+              fi
+              echo "Iniciando $service..."
+              railway redeploy \
+                --project "$RAILWAY_PROJECT_ID" \
+                --service "$service" \
+                --environment "$RAILWAY_ENVIRONMENT" \
+                --yes
+            done
+            for service in "${services[@]}"; do
+              wait_for_success "$service"
+            done
+          }
+
+          # Bancos e armazenamento primeiro.
+          start_batch pgvector redis clickhouse minio
+
+          # Camada de atendimento.
+          start_batch baileys chatwoot
+
+          # Aplicação e observabilidade.
+          start_batch agents langfuse langfuseworker
+
+      - name: Validar aplicação e Chatwoot
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          wait_for_http() {
+            local name="$1"
+            local url="$2"
+            for attempt in $(seq 1 30); do
+              code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 15 "$url" || true)"
+              echo "$name: HTTP ${code:-000} ($attempt/30)"
+              case "$code" in
+                200|301|302|401) return 0 ;;
+              esac
+              sleep 10
+            done
+            echo "$name não ficou acessível: $url" >&2
+            return 1
+          }
+
+          wait_for_http "fazer.ai agents" "$AGENTS_HEALTH_URL"
+          wait_for_http "Chatwoot" "$CHATWOOT_HEALTH_URL"
+
+      - name: Resumo
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Ligar serviços Railway"
+            echo
+            echo "- Horário: $(TZ=America/Sao_Paulo date '+%d/%m/%Y %H:%M:%S %Z')"
+            echo "- Projeto: sunny-charm"
+            echo "- Ambiente: production"
+            echo "- Aplicação: $AGENTS_HEALTH_URL"
+            echo "- Chatwoot: $CHATWOOT_HEALTH_URL"
+          } >> "$GITHUB_STEP_SUMMARY"

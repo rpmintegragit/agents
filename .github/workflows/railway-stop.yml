@@ -1,0 +1,147 @@
+name: Desligar serviços Railway
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: railway-power-control
+  cancel-in-progress: false
+
+env:
+  RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+  RAILWAY_PROJECT_ID: aba50e0b-ef3e-4ca2-937a-bcfa2a66281c
+  RAILWAY_ENVIRONMENT: production
+  AGENTS_HEALTH_URL: https://agents-production-01bc.up.railway.app/api/health
+  CHATWOOT_HEALTH_URL: https://chatwoot-production-526a.up.railway.app
+
+jobs:
+  stop:
+    name: Desligar e validar os 9 serviços
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Validar configuração
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${RAILWAY_TOKEN:-}" ]]; then
+            echo "O secret RAILWAY_TOKEN não foi configurado no repositório." >&2
+            exit 1
+          fi
+
+      - name: Instalar Railway CLI
+        run: npm install --global @railway/cli@5.30.3
+
+      - name: Confirmar projeto Railway
+        run: railway status --project "$RAILWAY_PROJECT_ID" --environment "$RAILWAY_ENVIRONMENT" --json
+
+      - name: Desligar serviços na ordem segura
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          latest_status() {
+            railway deployment list \
+              --project "$RAILWAY_PROJECT_ID" \
+              --service "$1" \
+              --environment "$RAILWAY_ENVIRONMENT" \
+              --limit 1 \
+              --json | jq -r '
+                if type == "array" then (.[0].status // "UNKNOWN")
+                elif .deployments then (.deployments[0].status // "UNKNOWN")
+                else "UNKNOWN" end'
+          }
+
+          stop_service() {
+            local service="$1"
+            local status
+            status="$(latest_status "$service")"
+            case "$status" in
+              REMOVED|REMOVING|SLEEPING)
+                echo "$service já está desligado ($status)."
+                return 0
+                ;;
+            esac
+
+            echo "Desligando $service..."
+            railway down \
+              --project "$RAILWAY_PROJECT_ID" \
+              --service "$service" \
+              --environment "$RAILWAY_ENVIRONMENT" \
+              --yes
+          }
+
+          wait_for_stopped() {
+            local service="$1"
+            for attempt in $(seq 1 30); do
+              local status
+              status="$(latest_status "$service")"
+              echo "$service: $status ($attempt/30)"
+              case "$status" in
+                REMOVED|SLEEPING) return 0 ;;
+              esac
+              sleep 10
+            done
+            echo "Tempo excedido aguardando o desligamento de $service." >&2
+            return 1
+          }
+
+          # Consumidores primeiro; dados por último.
+          SERVICES=(
+            agents
+            chatwoot
+            baileys
+            langfuseworker
+            langfuse
+            minio
+            clickhouse
+            redis
+            pgvector
+          )
+
+          for service in "${SERVICES[@]}"; do
+            stop_service "$service"
+          done
+          for service in "${SERVICES[@]}"; do
+            wait_for_stopped "$service"
+          done
+
+      - name: Validar indisponibilidade pública
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          wait_for_offline() {
+            local name="$1"
+            local url="$2"
+            for attempt in $(seq 1 20); do
+              code="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 "$url" || true)"
+              echo "$name: HTTP ${code:-000} ($attempt/20)"
+              case "$code" in
+                200|301|302|401) sleep 10 ;;
+                *) return 0 ;;
+              esac
+            done
+            echo "$name continua acessível: $url" >&2
+            return 1
+          }
+
+          wait_for_offline "fazer.ai agents" "$AGENTS_HEALTH_URL"
+          wait_for_offline "Chatwoot" "$CHATWOOT_HEALTH_URL"
+
+      - name: Resumo
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Desligar serviços Railway"
+            echo
+            echo "- Horário: $(TZ=America/Sao_Paulo date '+%d/%m/%Y %H:%M:%S %Z')"
+            echo "- Projeto: sunny-charm"
+            echo "- Ambiente: production"
+            echo "- Os volumes persistentes não são excluídos por railway down."
+          } >> "$GITHUB_STEP_SUMMARY"
